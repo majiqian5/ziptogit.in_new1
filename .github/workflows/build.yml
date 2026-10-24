@@ -9,18 +9,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Theos official
-        uses: theos/setup-theos@v1
-        with:
-          scheme: rootless
-
-      - name: Build tweak
+      - name: Install toolchain
         run: |
+          sudo apt update
+          sudo apt install git make clang binutils libssl-dev -y
+          git clone https://github.com/theos/theos ~/theos
+          export THEOS=$HOME/theos
+          cd ~/theos
+          git submodule update --init --recursive
+      - name: Build
+        run: |
+          export THEOS=$HOME/theos
           cd playerpulse
           make clean
           make package FINALPACKAGE=1
-
       - name: Upload deb
         uses: actions/upload-artifact@v4
         with:
