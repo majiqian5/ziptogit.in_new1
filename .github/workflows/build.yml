@@ -10,12 +10,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Use prebuilt Theos
-        uses: Kritanta/action-theos@main
+      - name: Setup Theos official
+        uses: theos/setup-theos@v1
         with:
-          rootless: true
+          scheme: rootless
 
-      - name: Build
+      - name: Build tweak
         run: |
           cd playerpulse
           make clean
