@@ -1,102 +1,36 @@
 name: Build PlayerPulse
-
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
-
-permissions:
-  contents: write
-
-env:
-  HOMEBREW_NO_AUTO_UPDATE: 1
-  HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
-  THEOS: ${{ github.workspace }}/theos-roothide
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
-    name: Build (${{ matrix.build_variant }})
-    runs-on: macos-14
-    outputs:
-      package_version: ${{ steps.bump.outputs.package_version }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # - build_variant: rootful
-          - build_variant: rootless
-          # - build_variant: roothide
-
+    runs-on: ubuntu-latest
     steps:
-      - name: Setup Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: '15.4'
-
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Environment
+      - name: Install dependencies
         run: |
-          echo "$THEOS/bin" >> "$GITHUB_PATH"
-          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
-          echo "THEOS_IGNORE_PARALLEL_BUILDING_NOTICE=yes" >> "$HOME/.theosrc"
+          sudo apt update
+          sudo apt install -y build-essential git curl libssl-dev
 
-      - name: Bump Package Version
-        id: bump
+      - name: Setup Theos
         run: |
-          VERSION="5.2.0-${{ github.run_number }}"
-          echo "Using version: $VERSION"
-          sed -i '' "s/^Version: .*/Version: ${VERSION}/" control
-          echo "package_version=${VERSION}" >> "$GITHUB_OUTPUT"
+          git clone --recursive https://github.com/theos/theos.git ~/theos
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          export THEOS=$HOME/theos
+          curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos | bash
 
-      - name: Checkout Theos (RootHide)
-        uses: actions/checkout@v4
-        with:
-          repository: roothide/theos
-          path: theos-roothide
-          submodules: recursive
-
-      - name: Install iOS SDK (iPhoneOS16.5)
+      - name: Build tweak
         run: |
-          set -euo pipefail
-          mkdir -p "$THEOS/sdks"
-          if [ -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
-            echo "iPhoneOS16.5.sdk already present"
-            exit 0
-          fi
-          SDK_STAGE="$(mktemp -d)"
-          trap 'rm -rf "$SDK_STAGE"' EXIT
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$SDK_STAGE/sdks"
-          git -C "$SDK_STAGE/sdks" sparse-checkout set iPhoneOS16.5.sdk
-          cp -R "$SDK_STAGE/sdks/iPhoneOS16.5.sdk" "$THEOS/sdks/"
-          ls -1 "$THEOS/sdks"
+          cd playerpulse
+          make clean
+          make package FINALPACKAGE=1 THEOS=$HOME/theos
 
-      - name: Install Theos dependencies
-        run: |
-          brew install ldid dpkg xz
-          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
-
-      - name: Build Package
-        run: |
-          sh build.sh "${{ matrix.build_variant }}"
-          echo "=== .deb files ==="
-          find ./packages -name "*.deb" -type f
-
-      - name: Upload Artifacts
+      - name: Upload deb
         uses: actions/upload-artifact@v4
         with:
-          name: packages-${{ matrix.build_variant }}
-          path: ./packages/*.deb
-          if-no-files-found: error
-
-      - name: Create Release
-        if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
-        with:
-          token: ${{ github.token }}
-          tag_name: v${{ steps.bump.outputs.package_version }}
-          name: "律动播放器 v${{ steps.bump.outputs.package_version }}"
-          files: ./packages/*.deb
+          name: PlayerPulse-rootless
+          path: playerpulse/packages/*.deb
