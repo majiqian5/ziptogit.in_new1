@@ -1,5 +1,6 @@
 name: Build PlayerPulse
 
+# 替换路径：.github/workflows/build.yml
 on:
   workflow_dispatch:
   push:
@@ -13,20 +14,18 @@ permissions:
 env:
   HOMEBREW_NO_AUTO_UPDATE: 1
   HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
-  THEOS: ${{ github.workspace }}/theos-roothide
+  HOMEBREW_NO_ENV_HINTS: 1
 
 jobs:
   build:
     name: Build (${{ matrix.build_variant }})
     runs-on: macos-14
-    outputs:
-      package_version: ${{ steps.bump.outputs.package_version }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # - build_variant: rootful
           - build_variant: rootless
+          # - build_variant: rootful
           # - build_variant: roothide
 
     steps:
@@ -38,62 +37,147 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Environment
-        run: |
-          echo "$THEOS/bin" >> "$GITHUB_PATH"
-          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
-          echo "THEOS_IGNORE_PARALLEL_BUILDING_NOTICE=yes" >> "$HOME/.theosrc"
-
-      - name: Bump Package Version
-        id: bump
-        run: |
-          VERSION="5.2.0-${{ github.run_number }}"
-          echo "Using version: $VERSION"
-          sed -i '' "s/^Version: .*/Version: ${VERSION}/" control
-          echo "package_version=${VERSION}" >> "$GITHUB_OUTPUT"
-
       - name: Checkout Theos (RootHide)
         uses: actions/checkout@v4
         with:
           repository: roothide/theos
-          path: theos-roothide
+          path: theos
           submodules: recursive
+
+      - name: Setup Environment
+        run: |
+          set -euo pipefail
+          THEOS_PATH="$GITHUB_WORKSPACE/theos"
+          echo "THEOS=$THEOS_PATH" >> "$GITHUB_ENV"
+          echo "$THEOS_PATH/bin" >> "$GITHUB_PATH"
+          mkdir -p "$HOME/.theos"
+          echo "THEOS_IGNORE_PARALLEL_BUILDING_NOTICE=yes" >> "$HOME/.theosrc"
+          printf 'THEOS=%s\n' "$THEOS_PATH"
+          ls -1 "$THEOS_PATH" | sed 's/^/  theos\//'
+          if [ -d "$THEOS_PATH/lib" ]; then ls -1 "$THEOS_PATH/lib" | sed 's/^/  theos\/lib\//'; fi
+          if [ -d "$THEOS_PATH/vendor/lib" ]; then ls -1 "$THEOS_PATH/vendor/lib" | sed 's/^/  theos\/vendor\/lib\//'; fi
 
       - name: Install iOS SDK (iPhoneOS16.5)
         run: |
           set -euo pipefail
-          mkdir -p "$THEOS/sdks"
-          if [ -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
+          THEOS_PATH="$GITHUB_WORKSPACE/theos"
+          mkdir -p "$THEOS_PATH/sdks"
+          if [ -d "$THEOS_PATH/sdks/iPhoneOS16.5.sdk" ]; then
             echo "iPhoneOS16.5.sdk already present"
+            ls -1 "$THEOS_PATH/sdks"
             exit 0
           fi
           SDK_STAGE="$(mktemp -d)"
-          trap 'rm -rf "$SDK_STAGE"' EXIT
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$SDK_STAGE/sdks"
-          git -C "$SDK_STAGE/sdks" sparse-checkout set iPhoneOS16.5.sdk
-          cp -R "$SDK_STAGE/sdks/iPhoneOS16.5.sdk" "$THEOS/sdks/"
-          ls -1 "$THEOS/sdks"
+          if ! git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$SDK_STAGE/sdks"; then
+            echo "[FATAL] clone theos/sdks failed"
+            exit 1
+          fi
+          if ! git -C "$SDK_STAGE/sdks" sparse-checkout set iPhoneOS16.5.sdk; then
+            echo "[FATAL] sparse-checkout set iPhoneOS16.5.sdk failed"
+            git -C "$SDK_STAGE/sdks" sparse-checkout list || true
+            exit 1
+          fi
+          if [ ! -d "$SDK_STAGE/sdks/iPhoneOS16.5.sdk" ]; then
+            echo "[FATAL] iPhoneOS16.5.sdk not found in theos/sdks"
+            ls -1 "$SDK_STAGE/sdks"
+            exit 1
+          fi
+          cp -R "$SDK_STAGE/sdks/iPhoneOS16.5.sdk" "$THEOS_PATH/sdks/"
+          test -f "$THEOS_PATH/sdks/iPhoneOS16.5.sdk/SDKSettings.plist"
+          du -sh "$THEOS_PATH/sdks/iPhoneOS16.5.sdk"
+          ls -1 "$THEOS_PATH/sdks"
 
       - name: Install Theos dependencies
         run: |
-          brew install ldid dpkg xz
-          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          set -euo pipefail
+          brew install ldid dpkg xz || brew upgrade ldid dpkg xz || true
+          BREW_BIN="$(brew --prefix)/bin"
+          echo "$BREW_BIN" >> "$GITHUB_PATH"
+          export PATH="$BREW_BIN:$PATH"
+          for tool in ldid dpkg-deb; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "[FATAL] $tool not installed"
+              exit 1
+            fi
+          done
+          ldid -v || true
+          dpkg-deb --version | sed -n '1p'
+
+      - name: Bump Package Version
+        id: bump
+        run: |
+          set -euo pipefail
+          VERSION="5.2.0-${{ github.run_number }}"
+          python3 - "$VERSION" <<'PY'
+          import re, sys, pathlib
+          version = sys.argv[1]
+          p = pathlib.Path("control")
+          text = p.read_text()
+          if re.search(r'^Version: .*$', text, re.M):
+              text = re.sub(r'^Version: .*$', f'Version: {version}', text, count=1, flags=re.M)
+          else:
+              text += f"\nVersion: {version}\n"
+          p.write_text(text)
+          print(f"Using version: {version}")
+          PY
+          echo "package_version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set Control Architecture
+        run: |
+          set -euo pipefail
+          case "${{ matrix.build_variant }}" in
+            rootful) ARCH="iphoneos-arm" ;;
+            *)       ARCH="iphoneos-arm64" ;;
+          esac
+          python3 - "$ARCH" <<'PY'
+          import re, sys, pathlib
+          arch = sys.argv[1]
+          p = pathlib.Path("control")
+          text = p.read_text()
+          if re.search(r'^Architecture: .*$', text, re.M):
+              text = re.sub(r'^Architecture: .*$', f'Architecture: {arch}', text, count=1, flags=re.M)
+          else:
+              text += f"\nArchitecture: {arch}\n"
+          # 标准键名是 SileoDepiction
+          text = re.sub(r'^Sileodepiction:', 'SileoDepiction:', text, count=1, flags=re.M)
+          p.write_text(text)
+          print(text)
+          PY
 
       - name: Build Package
         run: |
-          sh build.sh "${{ matrix.build_variant }}"
+          set -euo pipefail
+          export FINALPACKAGE=1 DEBUG=0
+          echo "THEOS=$THEOS  SCHEME=${{ matrix.build_variant }}"
+          sh build.sh "${{ matrix.build_variant }}" 2>&1 | tee build.log
           echo "=== .deb files ==="
-          find ./packages -name "*.deb" -type f
+          find ./packages -name "*.deb" -type f -exec ls -lh {} \; || true
+          COUNT="$(find ./packages -name '*.deb' -type f | wc -l | tr -d ' ')"
+          echo "deb count: $COUNT"
+          test "$COUNT" -ge 1
 
       - name: Upload Artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.build_variant }}
           path: ./packages/*.deb
-          if-no-files-found: error
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.build_variant }}
+          path: |
+            build.log
+            control
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Create Release
-        if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) || github.event_name == 'workflow_dispatch'
+        if: success() && (github.event_name == 'workflow_dispatch' || contains(fromJSON('["refs/heads/main","refs/heads/master"]'), github.ref))
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ github.token }}
