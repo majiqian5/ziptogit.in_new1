@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "name": "PlayerPulse",
+  "id": "playerpulse",
+  "display_name": "律动播放器",
+  "class_prefix": "AxsPlayerPulse",
+  "symbol_prefix": "axs_playerpulse",
+  "package": "com.axs.playerpulse",
+  "bundle": "com.apple.springboard",
+  "sdk_version": "16.5",
+  "minimum_ios": "16.0",
+  "preferences": true,
+  "slider": true,
+  "github_actions": true
+}
