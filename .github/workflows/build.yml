@@ -8,26 +8,18 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y build-essential git curl libssl-dev
+      - name: Use prebuilt Theos
+        uses: Kritanta/action-theos@main
+        with:
+          rootless: true
 
-      - name: Setup Theos
-        run: |
-          git clone --recursive https://github.com/theos/theos.git ~/theos
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-          export THEOS=$HOME/theos
-          curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos | bash
-
-      - name: Build tweak
+      - name: Build
         run: |
           cd playerpulse
           make clean
-          make package FINALPACKAGE=1 THEOS=$HOME/theos
+          make package FINALPACKAGE=1
 
       - name: Upload deb
         uses: actions/upload-artifact@v4
