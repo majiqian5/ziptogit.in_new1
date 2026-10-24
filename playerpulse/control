@@ -1,0 +1,11 @@
+Package: com.axs.playerpulse
+Name: 律动播放器
+Version: 5.2.0
+Architecture: iphoneos-arm
+Description: 锁屏与控制中心播放器美化：多彩频谱、按钮尺寸、字体颜色大小、专辑圆角与背景
+Maintainer: Axs
+Author: Axs
+Section: Axs-Tweaks
+Depends: mobilesubstrate, preferenceloader
+Icon: https://axs66.github.io/pro/icon/playerpulse.png
+Sileodepiction: https://axs66.github.io/pro/sileodepiction/playerpulse/js.json
