@@ -1,7 +1,7 @@
 name: Build PlayerPulse
 
-# 放到仓库的 .github/workflows/build.yml（覆盖原文件）
-# 跑在 Ubuntu 上：不用 macOS、不碰 brew，快且稳
+# 放到仓库 .github/workflows/build.yml（整份覆盖）
+# 特点：先自检仓库结构 → 自动定位源码目录 → 无论如何都把日志留下来
 
 on:
   workflow_dispatch:
@@ -24,103 +24,181 @@ jobs:
           # - build_variant: roothide
 
     steps:
-      - name: Checkout 源码
+      - name: 1. 取代码
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: 安装编译工具链
-        run: |
-          set -eux
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential git curl ca-certificates xz-utils fakeroot \
-            dpkg-dev clang lld make perl python3 unzip
-          sudo curl -fsSL -o /usr/local/bin/ldid \
-            https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_linux_x86_64
-          sudo chmod +x /usr/local/bin/ldid
-          ldid -v 2>&1 | head -2 || true
-          clang --version | head -1
-          ld64.lld --version 2>&1 | head -1 || ld64.lld -v 2>&1 | head -1 || true
-          dpkg-deb --version | head -1
-
-      - name: 拉 Theos (roothide fork)
-        run: |
-          set -eux
-          git clone --depth 1 --recursive https://github.com/roothide/theos.git "$GITHUB_WORKSPACE/theos"
-          echo "THEOS=$GITHUB_WORKSPACE/theos" >> "$GITHUB_ENV"
-          echo "$GITHUB_WORKSPACE/theos/bin" >> "$GITHUB_PATH"
-          test -f "$GITHUB_WORKSPACE/theos/vendor/lib/libsubstrate.tbd"
-          ls -1 "$GITHUB_WORKSPACE/theos/vendor/lib" | head -30
-
-      - name: 拉 iPhoneOS 16.5 SDK
-        run: |
-          set -eux
-          mkdir -p "$THEOS/sdks"
-          STAGE="$(mktemp -d)"
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$STAGE/sdks"
-          git -C "$STAGE/sdks" sparse-checkout set iPhoneOS16.5.sdk
-          test -d "$STAGE/sdks/iPhoneOS16.5.sdk"
-          cp -R "$STAGE/sdks/iPhoneOS16.5.sdk" "$THEOS/sdks/"
-          test -f "$THEOS/sdks/iPhoneOS16.5.sdk/SDKSettings.plist"
-          test -d "$THEOS/sdks/iPhoneOS16.5.sdk/System/Library/PrivateFrameworks/Preferences.framework"
-          du -sh "$THEOS/sdks/iPhoneOS16.5.sdk"
-
-      - name: 整理 control
-        id: meta
-        run: |
-          set -eux
-          VERSION="5.2.0-${{ github.run_number }}"
-          sed -i "s/^Version:.*/Version: ${VERSION}/" control
-          sed -i 's/^Sileodepiction:/SileoDepiction:/' control
-          case "${{ matrix.build_variant }}" in
-            rootful) ARCH="iphoneos-arm" ;;
-            *)       ARCH="iphoneos-arm64" ;;
-          esac
-          sed -i "s/^Architecture:.*/Architecture: ${ARCH}/" control
-          cat control
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: 编译打包
+      # ---------- 这一步是这次的重点：先弄清楚仓库里到底有什么 ----------
+      - name: 2. 自检仓库 + 定位源码目录
+        id: locate
         run: |
           set -uo pipefail
-          export FINALPACKAGE=1 DEBUG=0
+          echo "===== 仓库根目录 ====="
+          ls -la
+          echo "===== 找 control / Makefile / .xm ====="
+          find . -maxdepth 4 \( -name control -o -name Makefile -o -name '*.xm' \) -not -path './.git/*' | sort
+
+          PKG=""
+          while IFS= read -r c; do
+            d="$(dirname "$c")"
+            if [ -f "$d/Makefile" ]; then
+              PKG="$d"
+              break
+            fi
+          done < <(find . -maxdepth 4 -name control -not -path './.git/*' | sort)
+
+          if [ -z "$PKG" ]; then
+            echo "::error::仓库里找不到同时含 control 和 Makefile 的插件工程目录，源码很可能没推上来（或放在仓库以外的位置）。"
+            {
+              echo "### 没找到源码工程"
+              echo ""
+              echo "仓库里只有这些文件："
+              echo '```'
+              find . -maxdepth 3 -not -path './.git*' | sort | head -80
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          PKG="${PKG#./}"
+          echo "工程目录：$PKG"
+          ls -la "$PKG"
+          echo "pkgdir=$PKG" >> "$GITHUB_OUTPUT"
+
+      - name: 3. 安装编译工具链
+        run: |
+          set -uxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git curl ca-certificates xz-utils zstd fakeroot \
+            dpkg-dev clang lld make perl python3 unzip libplist3
+          sudo curl -fsSL -o /usr/local/bin/ldid \
+            https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64
+          sudo chmod +x /usr/local/bin/ldid
+          ldid -v || true
+          clang --version | head -1
+          dpkg-deb --version | head -1
+
+      - name: 4. 装 Theos（官方版，rootless 支持最稳）
+        run: |
+          set -uxo pipefail
+          rm -rf "$RUNNER_TEMP/theos"
+          git clone --depth 1 --recursive https://github.com/theos/theos.git "$RUNNER_TEMP/theos"
+          echo "THEOS=$RUNNER_TEMP/theos" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/theos/bin" >> "$GITHUB_PATH"
+
+          if [ ! -f "$RUNNER_TEMP/theos/vendor/lib/libsubstrate.tbd" ]; then
+            echo "vendor/lib 里没有 libsubstrate.tbd，补一个最小的链接桩"
+            printf '%s\n' \
+              '--- !tapi-tbd' \
+              'tbd-version: 4' \
+              'targets: [ arm64-ios, arm64e-ios ]' \
+              'install-name: /usr/lib/libsubstrate.dylib' \
+              'current-version: 0.9.7101' \
+              'compatibility-version: 0.9.7101' \
+              'exports:' \
+              '  - targets: [ arm64-ios, arm64e-ios ]' \
+              '    symbols: [ MSHookFunction, MSHookMessageEx, MSFindSymbol ]' \
+              '...' > "$RUNNER_TEMP/theos/vendor/lib/libsubstrate.tbd"
+          fi
+          ls -1 "$RUNNER_TEMP/theos/vendor/lib" | head -20
+
+      - name: 5. 拉 iOS SDK
+        run: |
+          set -uxo pipefail
+          SDK_DIR="$THEOS/sdks"
+          mkdir -p "$SDK_DIR"
+          STAGE="$RUNNER_TEMP/sdks"
+          rm -rf "$STAGE"
+
+          if git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$STAGE"; then
+            cd "$STAGE"
+            WANT="iPhoneOS16.5.sdk"
+            if ! git ls-tree -d --name-only HEAD | grep -qx "$WANT"; then
+              WANT="$(git ls-tree -d --name-only HEAD | grep -E '^iPhoneOS[0-9.]+\.sdk$' | sort -V | tail -1)"
+              echo "没找到 16.5，改用最新版：$WANT"
+            fi
+            if [ -n "${WANT:-}" ]; then
+              git sparse-checkout set "$WANT" || true
+              if [ -d "$WANT" ]; then
+                cp -R "$WANT" "$SDK_DIR/"
+              fi
+            fi
+          fi
+
+          echo "===== 可用 SDK ====="
+          ls -1 "$SDK_DIR" || true
+          ls -d "$SDK_DIR"/*.sdk 2>/dev/null || { echo "::error::SDK 没拉下来"; exit 1; }
+          test -f "$SDK_DIR"/iPhoneOS*.sdk/SDKSettings.plist || { echo "::error::SDK 不完整（缺 SDKSettings.plist）"; exit 1; }
+          du -sh "$SDK_DIR"/*.sdk
+
+      - name: 6. 修 control（版本号 / 架构 / 键名）
+        working-directory: ${{ steps.locate.outputs.pkgdir }}
+        run: |
+          set -uxo pipefail
+          test -f control || { echo "::error::工程目录里没有 control"; exit 1; }
+          cp control control.orig
+          python3 - "${{ matrix.build_variant }}" "${{ github.run_number }}" <<'PY'
+          import re, sys
+          scheme, run_no = sys.argv[1], sys.argv[2]
+          arch = "iphoneos-arm" if scheme == "rootful" else "iphoneos-arm64"
+          text = open("control", encoding="utf-8").read()
+          text = re.sub(r"(?m)^Version:.*$", f"Version: 5.2.0-{run_no}", text)
+          text = re.sub(r"(?m)^Architecture:.*$", f"Architecture: {arch}", text)
+          text = re.sub(r"(?m)^Sileodepiction:", "SileoDepiction:", text)
+          open("control", "w", encoding="utf-8").write(text)
+          print(text)
+          PY
+
+      - name: 7. 编译打包
+        working-directory: ${{ steps.locate.outputs.pkgdir }}
+        run: |
+          set -uo pipefail
+          make clean > cleanup.log 2>&1 || true
           set +e
-          bash build.sh "${{ matrix.build_variant }}" 2>&1 | tee build.log
-          RC=${PIPESTATUS[0]}
+          make package FINALPACKAGE=1 DEBUG=0 THEOS_PACKAGE_SCHEME=${{ matrix.build_variant }} > build.log 2>&1
+          RC=$?
           set -e
-          echo "=== exit code: $RC"
+          echo "=== make exit code: $RC"
+          cat build.log
+          echo "=== packages ==="
           ls -la packages 2>/dev/null || true
           {
             echo "## Build (${{ matrix.build_variant }}) — exit \`$RC\`"
             echo ""
             echo '```'
-            tail -n 80 build.log 2>/dev/null || echo "(no build.log)"
+            tail -n 60 build.log 2>/dev/null || echo "(no build.log)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit $RC
 
-      - name: 上传 deb
+      - name: 8. 上传 deb
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.build_variant }}
-          path: packages/*.deb
-          if-no-files-found: warn
+          path: "**/*.deb"
+          if-no-files-found: ignore
           retention-days: 14
 
-      - name: 上传日志
+      - name: 9. 上传日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ matrix.build_variant }}
-          path: build.log
-          if-no-files-found: warn
+          path: |
+            **/build.log
+            **/cleanup.log
+            **/control
+          if-no-files-found: ignore
           retention-days: 14
 
-      - name: 发 Release
+      - name: 10. 发 Release
         if: success()
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ github.token }}
-          tag_name: v${{ steps.meta.outputs.version }}
-          name: "律动播放器 v${{ steps.meta.outputs.version }}"
-          files: packages/*.deb
+          tag_name: v5.2.0-${{ github.run_number }}
+          name: "律动播放器 v5.2.0-${{ github.run_number }}"
+          files: "**/*.deb"
